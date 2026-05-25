@@ -1,0 +1,11 @@
+# .NET Core
+bin/
+obj/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+
+# macOS
+.DS_Store
