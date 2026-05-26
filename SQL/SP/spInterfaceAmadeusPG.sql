@@ -9,12 +9,12 @@ DECLARE
     -- Variables generales de control
     v_line TEXT;
     v_lines TEXT[];
-    v_state INT := 0;
+    v_state INTEGER := 0;
     
     -- Variables para la tabla BookingGDS (nombres mapeados exactamente al esquema)
     v_code VARCHAR(10);
     v_type VARCHAR(10);
-    v_blanch VARCHAR(25) := '001';
+    v_blanch VARCHAR(25) := 'OFP';
     v_implant VARCHAR(25);
     v_external BOOLEAN := false;
     v_date TIMESTAMP;
@@ -29,7 +29,7 @@ DECLARE
     v_observation TEXT;
 
     -- Variables temporales auxiliares
-    v_nacionalidad INT := 1;
+    v_nacionalidad INTEGER := 1;
     v_centrocosto VARCHAR(50);
     v_solicita VARCHAR(200);
     v_over VARCHAR(25);
@@ -47,6 +47,7 @@ DECLARE
     v_aerolinea_vende VARCHAR(2);
     v_pax_ape VARCHAR(40);
     v_pax_name VARCHAR(40);
+	v_pax_prefix VARCHAR(3);
     v_tkt_prefix VARCHAR(3);
     v_tkt VARCHAR(20);
     
@@ -56,6 +57,7 @@ DECLARE
     v_iti_vuelos TEXT[] := '{}';
     v_iti_clases TEXT[] := '{}';
     v_iti_aerolineas TEXT[] := '{}';
+	v_iti_fechas_llegada TIMESTAMP[] := '{}';
     v_iti_fechas_salida TIMESTAMP[] := '{}';
     v_iti_horas_salida TEXT[] := '{}';
     v_iti_horas_llegada TEXT[] := '{}';
@@ -63,8 +65,9 @@ DECLARE
 
     v_pax_nombres TEXT[] := '{}';
     v_pax_apellidos TEXT[] := '{}';
+	v_pax_prefixs TEXT[] := '{}';
     v_pax_tiquetes TEXT[] := '{}';
-    v_pax_idx INT := 0;
+    v_pax_idx INTEGER := 0;
 
     v_tax_codes TEXT[] := '{}';
     v_tax_vals NUMERIC[] := '{}';
@@ -78,13 +81,13 @@ DECLARE
     v_pay_montos NUMERIC[] := '{}';
 
     -- IDs de inserción
-    v_booking_gds_id INT;
-    v_booking_product_gds_id INT;
-    v_booking_product_emd_id INT;
+    v_booking_gds_id INTEGER;
+    v_booking_product_gds_id INTEGER;
+    v_booking_product_emd_id INTEGER;
     
     -- Utilidades
-    v_pos_barra INT;
-    v_pos_punto_coma INT;
+    v_pos_barra INTEGER;
+    v_pos_punto_coma INTEGER;
     v_sub_line TEXT;
     v_imp_code VARCHAR(2);
     
@@ -99,7 +102,7 @@ DECLARE
     v_emd_codigo VARCHAR(50);
     v_emd_index VARCHAR(50);
     v_emd_descripcion VARCHAR(500);
-    v_i INT;
+    v_i INTEGER;
 BEGIN
     -- 1. Separar el archivo por saltos de línea
     v_lines := string_to_array(p_Booking, E'\n');
@@ -160,9 +163,12 @@ BEGIN
                 v_iti_co2 := array_append(v_iti_co2, 0.0);
             END IF;
 
+			v_iti_horas_salida := array_append(v_iti_horas_salida, substring(v_line from 75 for 2) || substring(v_line from 77 for 2));
+            v_iti_horas_llegada := array_append(v_iti_horas_llegada, substring(v_line from 80 for 2) || substring(v_line from 82 for 2));
+
             -- Fechas (Asumiendo el año de v_date)
             DECLARE
-                v_mes_str VARCHAR(3); v_mes VARCHAR(2); v_dia VARCHAR(2); v_anio VARCHAR(4);
+                v_mes_str VARCHAR(3); v_mes VARCHAR(2); v_dia VARCHAR(2); v_anio VARCHAR(4); v_horas VARCHAR(5); v_horal VARCHAR(5);
             BEGIN
                 v_anio := to_char(COALESCE(v_date, CURRENT_TIMESTAMP), 'YYYY');
                 v_mes_str := substring(v_line from 72 for 3);
@@ -174,13 +180,14 @@ BEGIN
                     WHEN 'OCT' THEN '10' WHEN 'NOV' THEN '11' WHEN 'DEC' THEN '12'
                     ELSE '01'
                 END;
-                v_iti_fechas_salida := array_append(v_iti_fechas_salida, to_timestamp(v_anio || v_mes || v_dia, 'YYYYMMDD'));
+				v_horas := (substring(v_line from 75 for 2) || ':' || substring(v_line from 77 for 2));
+				v_horal := (substring(v_line from 80 for 2) || ':' || substring(v_line from 82 for 2));
+                v_iti_fechas_salida := array_append(v_iti_fechas_salida, to_timestamp(v_anio || v_mes || v_dia || ' ' || v_horas, 'YYYYMMDD HH:MM'));
+				v_iti_fechas_llegada := array_append(v_iti_fechas_llegada, to_timestamp(v_anio || v_mes || v_dia || ' ' || v_horal, 'YYYYMMDD HH:MM'));
             EXCEPTION WHEN OTHERS THEN
                 v_iti_fechas_salida := array_append(v_iti_fechas_salida, COALESCE(v_date, CURRENT_TIMESTAMP));
+				v_iti_fechas_llegada := array_append(v_iti_fechas_llegada, COALESCE(v_date, CURRENT_TIMESTAMP));
             END;
-
-            v_iti_horas_salida := array_append(v_iti_horas_salida, substring(v_line from 75 for 2) || substring(v_line from 77 for 2));
-            v_iti_horas_llegada := array_append(v_iti_horas_llegada, substring(v_line from 80 for 2) || substring(v_line from 82 for 2));
 
         -- I- PASAJEROS (Guardar en arrays)
         ELSIF starts_with(v_line, 'I-') THEN
@@ -194,11 +201,14 @@ BEGIN
                 
                 v_pax_name := replace(v_pax_name, 'MRS', '');
                 v_pax_name := replace(v_pax_name, 'MR', '');
+
+				v_pax_prefix := RIGHT(v_pax_name, 3);
                 
                 v_pax_nombres := array_append(v_pax_nombres, TRIM(v_pax_name));
                 v_pax_apellidos := array_append(v_pax_apellidos, TRIM(v_pax_ape));
                 v_pax_tiquetes := array_append(v_pax_tiquetes, ''); -- Se actualizará cuando llegue T-
-                v_pax_idx := v_pax_idx + 1;
+                v_pax_prefixs := array_append(v_pax_prefixs, TRIM(v_pax_prefix));
+				v_pax_idx := v_pax_idx + 1;
             END IF;
 
         -- T- TIQUETES (Actualizar el pasajero actual y dejar v_tkt seteado)
@@ -294,7 +304,7 @@ BEGIN
     v_description := COALESCE(v_evento, '') || ' ' || COALESCE(v_solicita, '');
 
     -- 1. Cabecera
-    INSERT INTO "BookingGDS" (
+    INSERT INTO public."BookingGDS" (
         "code", "type", "blanch", "implant", "external", "gds", "date", 
         "currency", "exchangeRate", "tiquetPrinter", "seller", "client", 
         "booking", "typetransaction", "iata", "description", "observation", "state"
@@ -320,7 +330,7 @@ BEGIN
     ) RETURNING "id" INTO v_booking_gds_id;
 
     -- 2. Producto Padre (Vuelo)
-    INSERT INTO "BookingProductGDS" (
+    INSERT INTO public."BookingProductGDS" (
         "bookingId", "code", "type", "description", "prestadoracode", 
         "quantity", "price", "reservationCode", "inNationality", "state", "typeproduct"
     ) VALUES (
@@ -331,12 +341,12 @@ BEGIN
     -- 3. Detalle Itinerarios
     FOR v_i IN 1 .. array_length(v_iti_origenes, 1) LOOP
         IF v_iti_origenes[v_i] IS NOT NULL THEN
-            INSERT INTO "BookingProductItinerayGDS" (
-                "id_bookingproductgds", "cd_origen", "cd_destino", "cd_clase", "ds_NumVuelo", 
-                "fecha_salida", "hora_salida", "hora_llegada", "terminal", "cd_aero_siglas", "am_co2"
+            INSERT INTO public."BookingProductItineraryGDS" (
+                "bookingProductId", "orden", "origin", "destination", "class", "checkInDate", 
+                "checkOutDate", "terminal", "prestadoraCode", "farebasis", "Numflight", "Typeflight", "amount"
             ) VALUES (
-                v_booking_product_gds_id, v_iti_origenes[v_i], v_iti_destinos[v_i], v_iti_clases[v_i], v_iti_vuelos[v_i], 
-                v_iti_fechas_salida[v_i], v_iti_horas_salida[v_i], v_iti_horas_llegada[v_i], v_iti_destinos[v_i], v_iti_aerolineas[v_i], v_iti_co2[v_i]
+                v_booking_product_gds_id, v_i, v_iti_origenes[v_i], v_iti_destinos[v_i], v_iti_clases[v_i], v_iti_fechas_salida[v_i], 
+				v_iti_fechas_llegada[v_i], v_iti_destinos[v_i], v_iti_aerolineas[v_i], '', v_iti_vuelos[v_i], '',  COALESCE(v_iti_co2[v_i],'0') 
             );
         END IF;
     END LOOP;
@@ -344,10 +354,10 @@ BEGIN
     -- 4. Detalle Pasajeros
     FOR v_i IN 1 .. array_length(v_pax_nombres, 1) LOOP
         IF v_pax_nombres[v_i] IS NOT NULL THEN
-            INSERT INTO "BookingProductPassangerGDS" (
-                "id_bookingproductgds", "ds_nombres", "ds_apellidos", "cd_tiquete"
+            INSERT INTO public."BookingProductPassangerGDS" (
+                "bookingProductId", "code", "firstnm", "lastnm", "prefix","identification","phone","email"
             ) VALUES (
-                v_booking_product_gds_id, v_pax_nombres[v_i], v_pax_apellidos[v_i], v_pax_tiquetes[v_i]
+                v_booking_product_gds_id, v_i::TEXT, v_pax_nombres[v_i], v_pax_apellidos[v_i], v_pax_prefixs[v_i], v_pax_tiquetes[v_i],'',''
             );
         END IF;
     END LOOP;
@@ -355,10 +365,10 @@ BEGIN
     -- 5. Detalle Impuestos (Taxes)
     FOR v_i IN 1 .. array_length(v_tax_codes, 1) LOOP
         IF v_tax_codes[v_i] IS NOT NULL THEN
-            INSERT INTO "BookingProductTaxGDS" (
-                "id_bookingproductgds", "cd_impuesto", "am_valor"
+            INSERT INTO public."BookingProductTaxGDS" (
+                "bookingProductId", "code", "name", "type", "ismain", "percentage", "amount"
             ) VALUES (
-                v_booking_product_gds_id, v_tax_codes[v_i], v_tax_vals[v_i]
+                v_booking_product_gds_id, v_tax_codes[v_i], v_tax_codes[v_i], 'tax', false, 0, v_tax_vals[v_i]
             );
         END IF;
     END LOOP;
@@ -366,7 +376,7 @@ BEGIN
     -- 6. Productos EMD
     FOR v_i IN 1 .. array_length(v_emd_codigos, 1) LOOP
         IF v_emd_codigos[v_i] IS NOT NULL THEN
-            INSERT INTO "BookingProductGDS" (
+            INSERT INTO public."BookingProductGDS" (
                 "bookingId", "code", "type", "description", "prestadoracode", 
                 "quantity", "price", "reservationCode", "inNationality", "state", "typeproduct"
             ) VALUES (
@@ -381,10 +391,13 @@ BEGIN
     -- 7. Formas de Pago
     FOR v_i IN 1 .. array_length(v_pay_tipos, 1) LOOP
         IF v_pay_tipos[v_i] IS NOT NULL THEN
-            INSERT INTO "BookingProductoPaymentGDS" (
-                "id_bookingproductgds", "cd_tipopago", "ds_tarjeta", "am_monto"
+            INSERT INTO public."BookingProductPaymentGDS" (
+                "bookingProductId", "bookingProductFEEId", "code", "name", "type", "typecreditcard", 
+				"numbercreditcard", "vouchercreditcard", "expiredcreditcard", "authcreditcard", "quotas", 
+				"bank", "square", "reference", "policy", "policyannex", "amount"
             ) VALUES (
-                v_booking_product_gds_id, v_pay_tipos[v_i], v_pay_tarjetas[v_i], v_pay_montos[v_i]
+                v_booking_product_gds_id, v_pay_tipos[v_i], v_pay_tipos[v_i], v_pay_tipos[v_i], v_pay_tarjetas[v_i],
+				'','','__/__','',0,'','','','','', v_pay_montos[v_i]
             );
         END IF;
     END LOOP;

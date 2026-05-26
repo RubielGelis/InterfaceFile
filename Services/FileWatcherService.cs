@@ -38,6 +38,17 @@ namespace InterfaceFile.Services
 
             _logger.LogInformation($"Servicio FileWatcher iniciado. Observando directorio: {watchPath}");
 
+            // Procesar los archivos que ya existan en la carpeta antes de iniciar
+            Task.Run(async () =>
+            {
+                var existingFiles = Directory.GetFiles(watchPath);
+                foreach (var file in existingFiles)
+                {
+                    _logger.LogInformation($"Encontrado archivo existente al iniciar: {Path.GetFileName(file)}");
+                    await ProcessFileAsync(file, stoppingToken);
+                }
+            }, stoppingToken);
+
             return Task.CompletedTask;
         }
 
@@ -56,6 +67,7 @@ namespace InterfaceFile.Services
                     _logger.LogInformation($"Procesando archivo: {fileName}");
 
                     var connectionString = _configuration.GetConnectionString("DefaultConnection");
+                    _logger.LogInformation($"Connection String: {connectionString}");
 
                     using (var connection = new NpgsqlConnection(connectionString))
                     {
@@ -65,7 +77,7 @@ namespace InterfaceFile.Services
                         {
                             command.CommandType = CommandType.StoredProcedure;
                             command.Parameters.AddWithValue("op", "procesar");
-                            command.Parameters.AddWithValue("Booking", fileContent);
+                            command.Parameters.AddWithValue("booking", fileContent);
                             command.Parameters.AddWithValue("file", fileName);
 
                             await command.ExecuteNonQueryAsync(stoppingToken);
@@ -83,6 +95,22 @@ namespace InterfaceFile.Services
             catch (Exception ex)
             {
                 _logger.LogError($"Error al procesar el archivo {filePath}: {ex.Message}");
+                
+                try
+                {
+                    if (File.Exists(filePath))
+                    {
+                        var errorPath = Path.Combine(Path.GetDirectoryName(filePath)!, "Errores");
+                        if (!Directory.Exists(errorPath)) Directory.CreateDirectory(errorPath);
+                        var fileName = Path.GetFileName(filePath);
+                        File.Move(filePath, Path.Combine(errorPath, fileName), true);
+                        _logger.LogInformation($"Archivo movido a la carpeta de Errores: {fileName}");
+                    }
+                }
+                catch (Exception moveEx)
+                {
+                    _logger.LogError($"No se pudo mover el archivo con error {filePath}: {moveEx.Message}");
+                }
             }
         }
 
