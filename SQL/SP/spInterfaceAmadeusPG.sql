@@ -79,6 +79,9 @@ DECLARE
     v_pay_tipos TEXT[] := '{}';
     v_pay_tarjetas TEXT[] := '{}';
     v_pay_montos NUMERIC[] := '{}';
+    v_pay_numbers TEXT[] := '{}';
+    v_pay_expiries TEXT[] := '{}';
+    v_pay_approvals TEXT[] := '{}';
 
     -- IDs de inserción
     v_booking_gds_id INTEGER;
@@ -94,6 +97,8 @@ DECLARE
     -- Variables para Tarifas
     v_arr_tarifas TEXT[];
     v_am_tarifa NUMERIC := 0;
+	v_am_impuestos NUMERIC := 0;
+	v_am_otros NUMERIC := 0;
     v_am_tarifalocal NUMERIC := 0;
     v_am_total NUMERIC := 0;
     
@@ -103,8 +108,39 @@ DECLARE
     v_emd_index VARCHAR(50);
     v_emd_descripcion VARCHAR(500);
     v_i INTEGER;
+	v_id_master_branch INTEGER;
+	v_id_master_implant INTEGER;
+	v_id_master_client INTEGER;
+	v_id_master_seller INTEGER;
+	v_id_master_provider INTEGER;
+	v_id_master_product INTEGER;
+	v_id_master_ticketprinter INTEGER;
+	v_id_master_prestadora INTEGER;
+	v_id_master_chargeandtax INTEGER;
+	p_interfaces INTEGER := 2;
+	v_err_context text :='';
+	v_ResultadoError text := '';
 BEGIN
-    -- 1. Separar el archivo por saltos de línea
+
+	-- Obtención de IDs de Maestros para equivalencias en un solo query
+	SELECT 
+		MAX(CASE WHEN code = 'Branch' THEN id END),
+		MAX(CASE WHEN code = 'Implant' THEN id END),
+		MAX(CASE WHEN code = 'Client' THEN id END),
+		MAX(CASE WHEN code = 'Seller' THEN id END),
+		MAX(CASE WHEN code = 'Provider' THEN id END),
+		MAX(CASE WHEN code = 'Product' THEN id END),
+		MAX(CASE WHEN code = 'TicketPrinter' THEN id END),
+		MAX(CASE WHEN code = 'Prestadora' THEN id END),
+		MAX(CASE WHEN code = 'ChargeAndTax' THEN id END)
+	INTO 
+		v_id_master_branch, v_id_master_implant, v_id_master_client, 
+		v_id_master_seller, v_id_master_provider, v_id_master_product,
+		v_id_master_ticketprinter, v_id_master_prestadora, v_id_master_chargeandtax
+	FROM public."Master"
+	WHERE code IN ('Branch', 'Implant', 'Client', 'Seller', 'Provider', 'Product', 'TicketPrinter', 'Prestadora', 'ChargeAndTax');
+    
+	-- 1. Separar el archivo por saltos de línea
     v_lines := string_to_array(p_Booking, E'\n');
     
     -- Estado de la reserva
@@ -222,19 +258,64 @@ BEGIN
             END IF;
 
         -- KFTF - IMPUESTOS Y TAXES
-        ELSIF starts_with(v_line, 'KFTF') THEN
-            v_imp_code := substring(v_line from 14 for 2);
-            v_tax_codes := array_append(v_tax_codes, COALESCE(v_imp_code, 'XX'));
-            v_tax_vals := array_append(v_tax_vals, 0.00);
+		--'KFTF','KNTB','KFTB','KSTF','KFTI','KNTI','KSTI'
+        ELSIF starts_with(v_line, 'KFTF') OR starts_with(v_line, 'KNTB') OR starts_with(v_line, 'KFTB') OR starts_with(v_line, 'KSTF') OR starts_with(v_line, 'KFTI') OR starts_with(v_line, 'KNTI') OR starts_with(v_line, 'KSTI') THEN
+            DECLARE
+                v_cols TEXT[];
+                v_col TEXT;
+                v_current_tax_code TEXT := '';
+                v_tax_val NUMERIC;
+                v_len INT;
+                v_tamano_val INT := 9;
+                v_i INT;
+            BEGIN
+                v_cols := string_to_array(v_line, ';');
+                FOR v_i IN 2 .. COALESCE(array_length(v_cols, 1), 0) LOOP
+                    v_col := v_cols[v_i];
+                    v_len := length(v_col);
+                    
+                    IF v_len >= 15 THEN
+                        IF COALESCE(v_current_tax_code, '') <> '' THEN
+                            BEGIN
+                                IF v_col LIKE '%usd%' THEN
+                                    v_tamano_val := 7;
+                                ELSE
+                                    v_tamano_val := 9;
+                                END IF;
+                                v_tax_val := cast(trim(substring(v_col from 5 for v_tamano_val)) as NUMERIC);
+                            EXCEPTION WHEN OTHERS THEN
+                                v_tax_val := 0;
+                            END;
+                            
+                            v_tax_codes := array_append(v_tax_codes, v_current_tax_code);
+                            v_tax_vals := array_append(v_tax_vals, v_tax_val);
+                            v_current_tax_code := '';
+                        END IF;
+                        
+                        IF v_col LIKE '%usd%' THEN
+                            v_current_tax_code := substring(v_col from 12 for 2);
+                        ELSE
+                            v_current_tax_code := substring(v_col from 14 for 2);
+                        END IF;
+                        v_current_tax_code := trim(v_current_tax_code);
+                        
+                        v_current_tax_code := public."fnEquivalenceInterface"(p_interfaces, v_id_master_chargeandtax, v_current_tax_code);
+                    END IF;
+                END LOOP;
+            END;
 
         -- TARIFAS (K-F, K-R, KS-F, KS-R, ATC, K-B)
-        ELSIF starts_with(v_line, 'K-F') OR starts_with(v_line, 'K-R') OR starts_with(v_line, 'KS-F') OR starts_with(v_line, 'KS-R') THEN
+		--'KN-I','KS-I','KN-B'
+        ELSIF starts_with(v_line, 'K-F') OR starts_with(v_line, 'K-R') OR starts_with(v_line, 'KS-F') OR starts_with(v_line, 'KS-R') OR starts_with(v_line, 'ATC') OR starts_with(v_line, 'K-B') OR starts_with(v_line, 'KN-I') OR starts_with(v_line, 'KS-I') OR starts_with(v_line, 'KN-B') THEN                       
             v_arr_tarifas := string_to_array(v_line, ';');
             
             IF array_length(v_arr_tarifas, 1) >= 13 THEN
                 v_currency := trim(substring(v_arr_tarifas[1] from 4 for 3));
                 BEGIN v_am_tarifa := cast(substring(v_arr_tarifas[1] from 7) as NUMERIC); EXCEPTION WHEN OTHERS THEN v_am_tarifa := 0; END;
                 BEGIN v_am_tarifalocal := cast(substring(v_arr_tarifas[2] from 4) as NUMERIC); EXCEPTION WHEN OTHERS THEN v_am_tarifalocal := 0; END;
+                IF COALESCE(v_am_tarifalocal, 0) = 0 THEN
+                    v_am_tarifalocal := v_am_tarifa;
+                END IF;
                 BEGIN v_am_total := cast(substring(v_arr_tarifas[13] from 4 for 11) as NUMERIC); EXCEPTION WHEN OTHERS THEN v_am_total := 0; END;
             END IF;
 
@@ -257,9 +338,60 @@ BEGIN
 
         -- FP - FORMAS DE PAGO
         ELSIF starts_with(v_line, 'FP') THEN
-            v_pay_tipos := array_append(v_pay_tipos, 'CC');
-            v_pay_tarjetas := array_append(v_pay_tarjetas, substring(v_line from 10 for 16));
-            v_pay_montos := array_append(v_pay_montos, 0.00);
+            DECLARE
+                v_fp_str TEXT;
+                v_fp_tipo TEXT := 'CA';
+                v_fp_tarjeta TEXT := '';
+                v_fp_number TEXT := '';
+                v_fp_expiry TEXT := '__/__';
+                v_fp_approval TEXT := '';
+                v_fp_monto NUMERIC := 0;
+                v_parts TEXT[];
+            BEGIN
+                v_fp_str := substring(v_line from 3); -- Remover 'FP'
+                
+                IF starts_with(v_fp_str, 'CASH') THEN
+                    v_fp_tipo := 'CA';
+                    v_fp_monto := COALESCE(v_am_total, 0);
+                ELSIF starts_with(v_fp_str, 'CC') THEN
+                    v_fp_tipo := 'CC';
+                    -- Formato: CC[TARJETA][NUMERO]/[EXPIRACION]/[APROBACION]
+                    v_fp_str := substring(v_fp_str from 3); -- Remover 'CC' (queda e.g. 'VI4111111111111111/1225/A123456')
+                    
+                    -- Extraer tipo tarjeta (primeros 2 caracteres)
+                    v_fp_tarjeta := substring(v_fp_str from 1 for 2);
+                    v_fp_str := substring(v_fp_str from 3); -- queda e.g. '4111111111111111/1225/A123456'
+                    
+                    -- Dividir por '/'
+                    v_parts := string_to_array(v_fp_str, '/');
+                    
+                    IF array_length(v_parts, 1) >= 1 THEN
+                        v_fp_number := v_parts[1];
+                    END IF;
+                    IF array_length(v_parts, 1) >= 2 THEN
+                        v_fp_expiry := v_parts[2];
+                        IF length(v_fp_expiry) = 4 THEN
+                            v_fp_expiry := substring(v_fp_expiry from 1 for 2) || '/' || substring(v_fp_expiry from 3 for 2);
+                        END IF;
+                    END IF;
+                    IF array_length(v_parts, 1) >= 3 THEN
+                        v_fp_approval := v_parts[3];
+                    END IF;
+                    
+                    v_fp_monto := COALESCE(v_am_total, 0);
+                ELSE
+                    -- Por defecto efectivo
+                    v_fp_tipo := 'CA';
+                    v_fp_monto := COALESCE(v_am_total, 0);
+                END IF;
+                
+                v_pay_tipos := array_append(v_pay_tipos, v_fp_tipo);
+                v_pay_tarjetas := array_append(v_pay_tarjetas, v_fp_tarjeta);
+                v_pay_montos := array_append(v_pay_montos, v_fp_monto);
+                v_pay_numbers := array_append(v_pay_numbers, v_fp_number);
+                v_pay_expiries := array_append(v_pay_expiries, v_fp_expiry);
+                v_pay_approvals := array_append(v_pay_approvals, v_fp_approval);
+            END;
 
         -- Otros Remarks (Cabecera)
         ELSIF v_line LIKE '%CENTRO COSTO%' THEN
@@ -303,31 +435,67 @@ BEGIN
     -- Combinar descripciones (evento + solicita si existen)
     v_description := COALESCE(v_evento, '') || ' ' || COALESCE(v_solicita, '');
 
-    -- 1. Cabecera
-    INSERT INTO public."BookingGDS" (
-        "code", "type", "blanch", "implant", "external", "gds", "date", 
-        "currency", "exchangeRate", "tiquetPrinter", "seller", "client", 
-        "booking", "typetransaction", "iata", "description", "observation", "state"
-    ) VALUES (
-        COALESCE(v_code, 'DESC'), 
-        COALESCE(v_type, 'RES'), 
-        v_blanch, 
-        v_implant, 
-        v_external, 
-        2, 
-        COALESCE(v_date, CURRENT_TIMESTAMP), 
-        v_currency, 
-        v_exchangeRate, 
-        COALESCE(v_tiquetPrinter, ''), 
-        COALESCE(v_seller, ''), 
-        COALESCE(v_client, ''), 
-        p_Booking, 
-        v_typetransaction, 
-        v_iata, 
-        v_description, 
-        v_observation, 
-        CAST(v_state AS VARCHAR)
-    ) RETURNING "id" INTO v_booking_gds_id;
+    -- 1. Cabecera (Upsert)
+    v_booking_gds_id := NULL;
+    IF v_code IS NOT NULL THEN
+        SELECT id INTO v_booking_gds_id FROM public."BookingGDS" WHERE "code" = v_code LIMIT 1;
+    END IF;
+
+    IF v_booking_gds_id IS NOT NULL THEN
+        -- Actualizar cabecera existente
+        UPDATE public."BookingGDS" SET
+            "type" = COALESCE(v_type, 'RES'), 
+            "blanch" = v_blanch, 
+            "implant" = v_implant, 
+            "external" = v_external, 
+            "gds" = 2, 
+            "date" = COALESCE(v_date, CURRENT_TIMESTAMP), 
+            "currency" = v_currency, 
+            "exchangeRate" = v_exchangeRate, 
+            "tiquetPrinter" = COALESCE(v_tiquetPrinter, ''), 
+            "seller" = COALESCE(v_seller, ''), 
+            "client" = COALESCE(v_client, ''), 
+            "booking" = p_Booking, 
+            "typetransaction" = v_typetransaction, 
+            "iata" = v_iata, 
+            "description" = v_description, 
+            "observation" = v_observation, 
+            "state" = CAST(v_state AS VARCHAR)
+        WHERE "id" = v_booking_gds_id;
+
+        -- Eliminar detalles anteriores en orden inverso por integridad referencial
+        DELETE FROM public."BookingProductPaymentGDS" WHERE "bookingProductId" IN (SELECT id FROM public."BookingProductGDS" WHERE "bookingId" = v_booking_gds_id);
+        DELETE FROM public."BookingProductTaxGDS" WHERE "bookingProductId" IN (SELECT id FROM public."BookingProductGDS" WHERE "bookingId" = v_booking_gds_id);
+        DELETE FROM public."BookingProductPassangerGDS" WHERE "bookingProductId" IN (SELECT id FROM public."BookingProductGDS" WHERE "bookingId" = v_booking_gds_id);
+        DELETE FROM public."BookingProductItineraryGDS" WHERE "bookingProductId" IN (SELECT id FROM public."BookingProductGDS" WHERE "bookingId" = v_booking_gds_id);
+        DELETE FROM public."BookingProductGDS" WHERE "bookingId" = v_booking_gds_id;
+    ELSE
+        -- Insertar nueva cabecera
+        INSERT INTO public."BookingGDS" (
+            "code", "type", "blanch", "implant", "external", "gds", "date", 
+            "currency", "exchangeRate", "tiquetPrinter", "seller", "client", 
+            "booking", "typetransaction", "iata", "description", "observation", "state"
+        ) VALUES (
+            COALESCE(v_code, 'DESC'), 
+            COALESCE(v_type, 'RES'), 
+            v_blanch, 
+            v_implant, 
+            v_external, 
+            2, 
+            COALESCE(v_date, CURRENT_TIMESTAMP), 
+            v_currency, 
+            v_exchangeRate, 
+            COALESCE(v_tiquetPrinter, ''), 
+            COALESCE(v_seller, ''), 
+            COALESCE(v_client, ''), 
+            p_Booking, 
+            v_typetransaction, 
+            v_iata, 
+            v_description, 
+            v_observation, 
+            CAST(v_state AS VARCHAR)
+        ) RETURNING "id" INTO v_booking_gds_id;
+    END IF;
 
     -- 2. Producto Padre (Vuelo)
     INSERT INTO public."BookingProductGDS" (
@@ -339,7 +507,7 @@ BEGIN
     ) RETURNING "id" INTO v_booking_product_gds_id;
 
     -- 3. Detalle Itinerarios
-    FOR v_i IN 1 .. array_length(v_iti_origenes, 1) LOOP
+    FOR v_i IN 1 .. COALESCE(array_length(v_iti_origenes, 1), 0) LOOP
         IF v_iti_origenes[v_i] IS NOT NULL THEN
             INSERT INTO public."BookingProductItineraryGDS" (
                 "bookingProductId", "orden", "origin", "destination", "class", "checkInDate", 
@@ -352,7 +520,7 @@ BEGIN
     END LOOP;
 
     -- 4. Detalle Pasajeros
-    FOR v_i IN 1 .. array_length(v_pax_nombres, 1) LOOP
+    FOR v_i IN 1 .. COALESCE(array_length(v_pax_nombres, 1), 0) LOOP
         IF v_pax_nombres[v_i] IS NOT NULL THEN
             INSERT INTO public."BookingProductPassangerGDS" (
                 "bookingProductId", "code", "firstnm", "lastnm", "prefix","identification","phone","email"
@@ -361,52 +529,76 @@ BEGIN
             );
         END IF;
     END LOOP;
-
+	--RAISE NOTICE '1';
     -- 5. Detalle Impuestos (Taxes)
-    FOR v_i IN 1 .. array_length(v_tax_codes, 1) LOOP
+	IF COALESCE(v_am_tarifalocal,0)<>0 THEN
+		INSERT INTO public."BookingProductTaxGDS" (
+	                "bookingProductId", "code", "name", "type", "ismain", "percentage", "amount"
+	            ) VALUES (
+					v_booking_product_gds_id,'TAR','Tarifa','CHARGE',true,0, v_am_tarifalocal
+				);
+	END IF;
+	--RAISE NOTICE '2';
+    FOR v_i IN 1 .. COALESCE(array_length(v_tax_codes, 1), 0) LOOP
         IF v_tax_codes[v_i] IS NOT NULL THEN
             INSERT INTO public."BookingProductTaxGDS" (
                 "bookingProductId", "code", "name", "type", "ismain", "percentage", "amount"
             ) VALUES (
-                v_booking_product_gds_id, v_tax_codes[v_i], v_tax_codes[v_i], 'tax', false, 0, v_tax_vals[v_i]
+                v_booking_product_gds_id, v_tax_codes[v_i], v_tax_codes[v_i], 'tax', false, 0, (COALESCE(v_tax_vals[v_i],'0')::DOUBLE PRECISION)
             );
+			v_am_impuestos := v_am_impuestos + COALESCE(v_tax_vals[v_i],'0')::NUMERIC; 
         END IF;
     END LOOP;
-
+	--RAISE NOTICE '3';
+	v_am_otros := COALESCE(v_am_total,0) - COALESCE(v_am_tarifalocal,0) - COALESCE(v_am_impuestos,0); 
+	IF COALESCE(v_am_otros,0)<>0 THEN
+		INSERT INTO public."BookingProductTaxGDS" (
+	                "bookingProductId", "code", "name", "type", "ismain", "percentage", "amount"
+	            ) VALUES (
+					v_booking_product_gds_id,'OTR','Otros','CHARGE',false,0, v_am_otros
+				);
+	END IF;
+	--RAISE NOTICE '4';
     -- 6. Productos EMD
-    FOR v_i IN 1 .. array_length(v_emd_codigos, 1) LOOP
+    FOR v_i IN 1 .. COALESCE(array_length(v_emd_codigos, 1), 0) LOOP
         IF v_emd_codigos[v_i] IS NOT NULL THEN
             INSERT INTO public."BookingProductGDS" (
-                "bookingId", "code", "type", "description", "prestadoracode", 
-                "quantity", "price", "reservationCode", "inNationality", "state", "typeproduct"
+				"bookingId", "code", "type", "description", "prestadoracode", 
+        		"quantity", "price", "reservationCode", "inNationality", "state", "typeproduct"
             ) VALUES (
-                v_booking_gds_id, v_emd_codigos[v_i], '1', v_emd_descripciones[v_i], v_aerolinea_vende, 
-                1, v_emd_totales[v_i], v_code, v_nacionalidad, 'NUEVO', 'EMD'
+                v_booking_gds_id, v_emd_codigos[v_i], 'flight', COALESCE(v_emd_descripciones[v_i],''), COALESCE(v_aerolinea_vende,''), 
+                1, COALESCE(v_emd_totales[v_i],0), v_code, COALESCE(v_nacionalidad,1), 'NUEVO', 'EMD'
             ) RETURNING "id" INTO v_booking_product_emd_id;
             
             -- Si los EMD tienen sus propios impuestos, itinerarios o pasajeros, se asociarian a v_booking_product_emd_id
         END IF;
     END LOOP;
-
+	--RAISE NOTICE '5';
     -- 7. Formas de Pago
-    FOR v_i IN 1 .. array_length(v_pay_tipos, 1) LOOP
+    FOR v_i IN 1 .. COALESCE(array_length(v_pay_tipos, 1), 0) LOOP
         IF v_pay_tipos[v_i] IS NOT NULL THEN
             INSERT INTO public."BookingProductPaymentGDS" (
                 "bookingProductId", "bookingProductFEEId", "code", "name", "type", "typecreditcard", 
 				"numbercreditcard", "vouchercreditcard", "expiredcreditcard", "authcreditcard", "quotas", 
 				"bank", "square", "reference", "policy", "policyannex", "amount"
             ) VALUES (
-                v_booking_product_gds_id, v_pay_tipos[v_i], v_pay_tipos[v_i], v_pay_tipos[v_i], v_pay_tarjetas[v_i],
-				'','','__/__','',0,'','','','','', v_pay_montos[v_i]
+                v_booking_product_gds_id, NULL, v_pay_tipos[v_i], v_pay_tipos[v_i], v_pay_tipos[v_i], v_pay_tarjetas[v_i],
+				COALESCE(v_pay_numbers[v_i], ''), '', COALESCE(v_pay_expiries[v_i], '__/__'), COALESCE(v_pay_approvals[v_i], ''), 0,
+				'', '', '', '', '', COALESCE(v_pay_montos[v_i], 0)
             );
         END IF;
     END LOOP;
-
-    RAISE NOTICE 'Amadeus Booking % successfully parsed and inserted.', v_code;
+	--RAISE NOTICE '6';
+    RAISE NOTICE 'Amadeus Booking % successfully parsed and inserted.', v_code ;
 
 EXCEPTION WHEN OTHERS THEN
-    RAISE NOTICE 'Error processing Amadeus file: % - %', SQLSTATE, SQLERRM;
-    ROLLBACK;
+
+	GET STACKED DIAGNOSTICS v_err_context = PG_EXCEPTION_CONTEXT;
+	--v_ResultadoError := '' || SQLERRM; --|| ' Contexto: ' || v_err_context;
+	RAISE NOTICE 'Error processing Amadeus file: % - % - %', SQLSTATE, SQLERRM, v_err_context;
+	--RAISE NOTICE 'Error processing Amadeus file: % - %', SQLSTATE, SQLERRM || ' Contexto: ' || v_err_context;
+    
+	ROLLBACK;
     RAISE;
 END;
 $$;
